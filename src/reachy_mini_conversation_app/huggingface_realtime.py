@@ -195,6 +195,10 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         self._voice_override: str | None = self._normalize_startup_voice(startup_voice)
         self._realtime_connect_query: dict[str, str] = {}
         self._connect_model: str | None = None
+        self._xai_mode: bool = False
+        self._xai_sent_frames: int = 0
+        self._xai_received_events: int = 0
+        self._xai_counters_task: asyncio.Task[None] | None = None
 
         # Debouncing for partial transcripts
         self.partial_transcript_task: asyncio.Task[None] | None = None
@@ -380,33 +384,34 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             )
         return fallback
 
-    def _get_session_config(self, tool_specs: list[ToolSpec]) -> RealtimeSessionCreateRequestParam:
-        """Return the OpenAI-compatible session config for the active backend."""
+    def _get_session_config(self, tool_specs: list[ToolSpec]) -> dict[str, Any]:
+        """Return the OpenAI/xAI-compatible session config as a plain dict.
+
+        For xAI, omit fields their server rejects (e.g., null transcription).
+        """
         is_xai = getattr(config, "HF_REALTIME_CONNECTION_MODE", HF_LOCAL_CONNECTION_MODE) == HF_XAI_CONNECTION_MODE
         input_format = _fixed_rate_audio_pcm(16000) if is_xai else _native_rate_audio_pcm()  # type: ignore[typeddict-item]
         output_format = _fixed_rate_audio_pcm(16000) if is_xai else _native_rate_audio_pcm()  # type: ignore[typeddict-item]
-        transcription = None if is_xai else AudioTranscriptionParam(
-            model="gpt-4o-transcribe",
-            language=get_session_language(),
-        )
-        return RealtimeSessionCreateRequestParam(
-            type="realtime",
-            instructions=get_session_instructions(self.instance_path),
-            audio=RealtimeAudioConfigParam(
-                input=RealtimeAudioConfigInputParam(
-                    # HF uses rate=None for native 16 kHz; xAI expects explicit 16 kHz.
-                    format=input_format,  # type: ignore[typeddict-item]
-                    transcription=transcription,  # type: ignore[arg-type]
-                    turn_detection=ServerVad(type="server_vad", interrupt_response=True),
-                ),
-                output=RealtimeAudioConfigOutputParam(
-                    format=output_format,  # type: ignore[typeddict-item]
-                    voice=self.get_current_voice(),
-                ),
-            ),
-            tools=to_realtime_tools_config(tool_specs),
-            tool_choice="auto",
-        )
+        audio_input: dict[str, Any] = {
+            "format": input_format,  # HF: rate=None, xAI: rate=16000
+            "turn_detection": {"type": "server_vad", "interrupt_response": True},
+        }
+        if not is_xai:
+            audio_input["transcription"] = {
+                "model": "gpt-4o-transcribe",
+                "language": get_session_language(),
+            }
+        session: dict[str, Any] = {
+            "type": "realtime",
+            "instructions": get_session_instructions(self.instance_path),
+            "audio": {
+                "input": audio_input,
+                "output": {"format": output_format, "voice": self.get_current_voice()},
+            },
+            "tools": to_realtime_tools_config(tool_specs),
+            "tool_choice": "auto",
+        }
+        return session
 
     def _is_connected(self) -> bool:
         """Return whether the realtime connection is open."""
@@ -547,6 +552,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                 logger.warning("Local VAD unavailable; using server VAD for movement: %s", exc)
                 self.paced_playback = False
         self.client = await self._build_realtime_client()
+        self._xai_mode = getattr(config, "HF_REALTIME_CONNECTION_MODE", HF_LOCAL_CONNECTION_MODE) == HF_XAI_CONNECTION_MODE
 
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
@@ -566,6 +572,10 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                     logger.info("Retrying in %.1f seconds...", delay)
                     await asyncio.sleep(delay)
                     continue
+                raise
+            except Exception:
+                # Surface any other startup failure with a full traceback
+                logger.exception("Realtime session failed with an unexpected error")
                 raise
             finally:
                 # never keep a stale reference
@@ -919,6 +929,12 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             try:
                 session_config = self._get_session_config(tool_specs)
                 await conn.session.update(session=session_config)
+                logger.info("Realtime websocket opened%s", " (xAI)" if self._xai_mode else "")
+                logger.info(
+                    "Session updated successfully (voice=%r, vad=server, input_rate=%s)",
+                    self.get_current_voice(),
+                    session_config["audio"]["input"]["format"].get("rate"),
+                )
                 logger.info(
                     "Realtime session initialized with profile=%r voice=%r",
                     getattr(config, "REACHY_MINI_CUSTOM_PROFILE", None),
@@ -939,6 +955,11 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             self._audio_response_id = None
             self._discarded_response_ids.clear()
             self._playback_interrupted = False
+            # Reset counters and start periodic reporter in xAI mode
+            self._xai_sent_frames = 0
+            self._xai_received_events = 0
+            if self._xai_mode:
+                self._xai_counters_task = asyncio.create_task(self._log_xai_counters_loop(), name="xai-counters")
             try:
                 self._connected_event.set()
             except Exception:
@@ -954,6 +975,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                 await self._send_startup_greeting_prompt()
 
                 async for event in self.connection:
+                    self._xai_received_events += 1
                     logger.debug("Realtime event: %s", event.type)
                     if event.type == "input_audio_buffer.speech_started":
                         self._mark_activity("user_speech_started")
@@ -1181,6 +1203,12 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                             await self.output_queue.put(
                                 AdditionalOutputs({"role": "assistant", "content": f"[error] {msg}"})
                             )
+            except ConnectionClosedError as e:
+                logger.info("Realtime connection closed: %r", e)
+                raise
+            except Exception:
+                logger.exception("Unhandled exception in realtime event loop")
+                raise
             finally:
                 self.connection = None
                 self._reset_listening()
@@ -1196,6 +1224,13 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
 
                 # Stop background tool manager tasks (listener + cleanup) in all paths.
                 await self.tool_manager.shutdown()
+                # Stop periodic xAI counters
+                if self._xai_counters_task is not None:
+                    self._xai_counters_task.cancel()
+                    try:
+                        await self._xai_counters_task
+                    except asyncio.CancelledError:
+                        pass
 
     # Microphone receive
     async def receive(self, frame: Tuple[int, NDArray[np.int16]]) -> None:
@@ -1230,6 +1265,8 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             try:
                 audio_message = base64.b64encode(audio_frame.tobytes()).decode("utf-8")
                 await asyncio.wait_for(connection.input_audio_buffer.append(audio=audio_message), AUDIO_SEND_TIMEOUT_S)
+                if self._xai_mode:
+                    self._xai_sent_frames += 1
             except TimeoutError:
                 # On a dead link the socket buffer fills, and every send, the websocket
                 # keepalive ping included, then waits for it to drain: without this the
@@ -1293,6 +1330,13 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                 logger.debug(f"connection.close() ignored: {e}")
             finally:
                 self.connection = None
+        # Stop periodic xAI counters
+        if self._xai_counters_task is not None:
+            self._xai_counters_task.cancel()
+            try:
+                await self._xai_counters_task
+            except asyncio.CancelledError:
+                pass
 
         # Clear any remaining items in the output queue
         while not self.output_queue.empty():
@@ -1313,6 +1357,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         if connection_selection.mode == HF_XAI_CONNECTION_MODE:
             api_key = (getattr(config, "XAI_API_KEY", None) or "").strip()
             if not api_key:
+                logger.info("XAI_API_KEY is missing or empty; cannot connect to xAI")
                 raise RuntimeError("XAI_API_KEY must be set when HF_REALTIME_CONNECTION_MODE=xai")
             base_url = (getattr(config, "XAI_BASE_URL", None) or "https://api.x.ai/v1").strip()
             model = (getattr(config, "XAI_MODEL", None) or "grok-voice-latest").strip()
@@ -1373,3 +1418,16 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         self._realtime_connect_query = connect_query
         self._connect_model = None
         return client
+
+    async def _log_xai_counters_loop(self) -> None:
+        """Log a periodic snapshot of mic frames sent and server events received (xAI only)."""
+        try:
+            while self.connection is not None:
+                await asyncio.sleep(5.0)
+                logger.info(
+                    "xAI telemetry: mic_frames_sent=%d, server_events=%d",
+                    self._xai_sent_frames,
+                    self._xai_received_events,
+                )
+        except asyncio.CancelledError:
+            raise
