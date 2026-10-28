@@ -545,6 +545,16 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
 
     async def start_up(self) -> None:
         """Start the handler with minimal retries on unexpected websocket closure."""
+        try:
+            sel = get_hf_connection_selection()
+            logger.info(
+                "Realtime start_up entry: mode=%s has_target=%s (xai_key_set=%s)",
+                sel.mode,
+                sel.has_target,
+                bool((getattr(config, \"XAI_API_KEY\", None) or \"\").strip()),
+            )
+        except Exception:
+            logger.debug("Failed to log start_up entry state", exc_info=True)
         if config.LOCAL_VAD_ENABLED:
             try:
                 self._local_vad = await asyncio.to_thread(SileroVAD)
