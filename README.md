@@ -166,6 +166,32 @@ HF_REALTIME_WS_URL=ws://127.0.0.1:8765/v1/realtime
 
 In the web UI's Settings view, the Connection section lets you choose either the built-in server or a local `host:port` target. The UI writes `HF_REALTIME_CONNECTION_MODE` for you, and the local path writes `HF_REALTIME_WS_URL` with a default of `localhost:8765`.
 
+### Using Grok (xAI)
+
+The app can use xAI Grok Voice as an OpenAI-compatible realtime backend.
+
+- Set `HF_REALTIME_CONNECTION_MODE=xai` and provide `XAI_API_KEY` in the app `.env`. Optional: `XAI_MODEL` (default `grok-voice-latest`), `XAI_VOICE` (default `eve`), `XAI_BASE_URL` (default `https://api.x.ai/v1`), and `XAI_VISION_MODEL` (used by the camera tool; default `grok-2-vision-latest`).
+- Audio runs at 16 kHz; the session config sends `audio/pcm` with an explicit `rate: 16000`.
+- The built-in voice list switches to a minimal Grok set (default `eve`).
+- Transcription model is not sent in xAI mode; partial transcripts arrive via `conversation.item.input_audio_transcription.updated` and are shown in the transcript view.
+- The `camera` tool does not push images into the realtime conversation in xAI mode. Instead, it captions the frame via the xAI Chat Completions API (model configurable via `XAI_VISION_MODEL`) and returns the text to the assistant.
+
+Reachy Mini Wireless installation:
+
+1) Install the stock Conversation App from the dashboard at `http://reachy-mini.local:8000`.
+2) SSH into the robot and reinstall this fork from the Grok branch:
+
+```bash
+ssh pollen@reachy-mini.local
+/venvs/apps_venv/bin/python -m pip install --force-reinstall "git+https://github.com/hyperbolic2346/reachy_mini_conversation_app.git@grok-xai"
+```
+
+Configuration on the robot:
+
+- The dashboard-launched app loads `.env` from `/home/pollen/.config/reachy_mini/conversation_app/.env`.
+- The web UI writes overrides to `settings.json` in the same directory; UI settings win over `.env`.
+- Updating the app from the dashboard reinstalls the stock package and overwrites this custom install; re-run the pip command above after an update if needed.
+
 ## Running the app
 
 Activate your virtual environment, then launch:

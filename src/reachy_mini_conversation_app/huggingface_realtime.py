@@ -31,6 +31,7 @@ from openai.types.realtime.realtime_audio_input_turn_detection_param import Serv
 from reachy_mini_conversation_app.tools import core_tools
 from reachy_mini_conversation_app.config import (
     HF_LOCAL_CONNECTION_MODE,
+    HF_XAI_CONNECTION_MODE,
     config,
     get_default_voice,
     set_custom_profile,
@@ -106,6 +107,16 @@ class HFNativeRateAudioPCM(TypedDict):
 def _native_rate_audio_pcm() -> HFNativeRateAudioPCM:
     """Return the Hugging Face native-rate PCM config."""
     return {"type": "audio/pcm", "rate": None}
+
+class FixedRateAudioPCM(TypedDict):
+    """Fixed-rate PCM audio for providers that require an explicit rate."""
+
+    type: Literal["audio/pcm"]
+    rate: int
+
+def _fixed_rate_audio_pcm(rate: int = 16000) -> FixedRateAudioPCM:
+    """Return a fixed PCM rate (default 16 kHz)."""
+    return {"type": "audio/pcm", "rate": int(rate)}
 
 
 def _abort_realtime_connection(connection: Any) -> None:
@@ -183,6 +194,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         self.instance_path = instance_path
         self._voice_override: str | None = self._normalize_startup_voice(startup_voice)
         self._realtime_connect_query: dict[str, str] = {}
+        self._connect_model: str | None = None
 
         # Debouncing for partial transcripts
         self.partial_transcript_task: asyncio.Task[None] | None = None
@@ -369,23 +381,26 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         return fallback
 
     def _get_session_config(self, tool_specs: list[ToolSpec]) -> RealtimeSessionCreateRequestParam:
-        """Return the Hugging Face OpenAI-compatible session config."""
+        """Return the OpenAI-compatible session config for the active backend."""
+        is_xai = getattr(config, "HF_REALTIME_CONNECTION_MODE", HF_LOCAL_CONNECTION_MODE) == HF_XAI_CONNECTION_MODE
+        input_format = _fixed_rate_audio_pcm(16000) if is_xai else _native_rate_audio_pcm()  # type: ignore[typeddict-item]
+        output_format = _fixed_rate_audio_pcm(16000) if is_xai else _native_rate_audio_pcm()  # type: ignore[typeddict-item]
+        transcription = None if is_xai else AudioTranscriptionParam(
+            model="gpt-4o-transcribe",
+            language=get_session_language(),
+        )
         return RealtimeSessionCreateRequestParam(
             type="realtime",
             instructions=get_session_instructions(self.instance_path),
             audio=RealtimeAudioConfigParam(
                 input=RealtimeAudioConfigInputParam(
-                    # The OpenAI SDK type only includes 24 kHz PCM, but the HF
-                    # compatible server uses rate=None for native 16 kHz mode.
-                    format=_native_rate_audio_pcm(),  # type: ignore[typeddict-item]
-                    transcription=AudioTranscriptionParam(
-                        model="gpt-4o-transcribe",
-                        language=get_session_language(),
-                    ),
+                    # HF uses rate=None for native 16 kHz; xAI expects explicit 16 kHz.
+                    format=input_format,  # type: ignore[typeddict-item]
+                    transcription=transcription,  # type: ignore[arg-type]
                     turn_detection=ServerVad(type="server_vad", interrupt_response=True),
                 ),
                 output=RealtimeAudioConfigOutputParam(
-                    format=_native_rate_audio_pcm(),  # type: ignore[typeddict-item]
+                    format=output_format,  # type: ignore[typeddict-item]
                     voice=self.get_current_voice(),
                 ),
             ),
@@ -819,39 +834,56 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             )
 
             if model_result_submitted and completed_tool.tool_name == "camera" and "b64_im" in tool_result:
-                # use raw base64, don't json.dumps (which adds quotes)
-                b64_im = tool_result["b64_im"]
-                if not isinstance(b64_im, str):
-                    logger.warning("Unexpected type for b64_im: %s", type(b64_im))
-                    b64_im = str(b64_im)
-                image_width = tool_result.get("image_width")
-                image_height = tool_result.get("image_height")
-                jpeg_bytes_value = tool_result.get("jpeg_bytes")
-                jpeg_bytes = jpeg_bytes_value if isinstance(jpeg_bytes_value, int) else (len(b64_im) * 3) // 4
-                await self.connection.conversation.item.create(
-                    item={
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_image",
-                                "image_url": f"data:image/jpeg;base64,{b64_im}",
-                            },
-                        ],
-                    },
-                )
-                if isinstance(image_width, int) and isinstance(image_height, int):
-                    logger.info(
-                        "Added camera image to conversation frame=%sx%s jpeg_bytes=%s",
-                        image_width,
-                        image_height,
-                        jpeg_bytes,
-                    )
+                if getattr(config, "HF_REALTIME_CONNECTION_MODE", HF_LOCAL_CONNECTION_MODE) == HF_XAI_CONNECTION_MODE:
+                    # xAI: do not attach the image to the realtime conversation; captioning runs via chat completions.
+                    image_width = tool_result.get("image_width")
+                    image_height = tool_result.get("image_height")
+                    jpeg_bytes_value = tool_result.get("jpeg_bytes")
+                    b64_im = tool_result["b64_im"]
+                    jpeg_bytes = jpeg_bytes_value if isinstance(jpeg_bytes_value, int) else (len(b64_im) * 3) // 4
+                    if isinstance(image_width, int) and isinstance(image_height, int):
+                        logger.info(
+                            "Camera image captured (xAI mode, not attached) frame=%sx%s jpeg_bytes=%s",
+                            image_width,
+                            image_height,
+                            jpeg_bytes,
+                        )
+                    else:
+                        logger.info("Camera image captured (xAI mode, not attached) jpeg_bytes=%s", jpeg_bytes)
                 else:
-                    logger.info(
-                        "Added camera image to conversation jpeg_bytes=%s",
-                        jpeg_bytes,
+                    # use raw base64, don't json.dumps (which adds quotes)
+                    b64_im = tool_result["b64_im"]
+                    if not isinstance(b64_im, str):
+                        logger.warning("Unexpected type for b64_im: %s", type(b64_im))
+                        b64_im = str(b64_im)
+                    image_width = tool_result.get("image_width")
+                    image_height = tool_result.get("image_height")
+                    jpeg_bytes_value = tool_result.get("jpeg_bytes")
+                    jpeg_bytes = jpeg_bytes_value if isinstance(jpeg_bytes_value, int) else (len(b64_im) * 3) // 4
+                    await self.connection.conversation.item.create(
+                        item={
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_image",
+                                    "image_url": f"data:image/jpeg;base64,{b64_im}",
+                                },
+                            ],
+                        },
                     )
+                    if isinstance(image_width, int) and isinstance(image_height, int):
+                        logger.info(
+                            "Added camera image to conversation frame=%sx%s jpeg_bytes=%s",
+                            image_width,
+                            image_height,
+                            jpeg_bytes,
+                        )
+                    else:
+                        logger.info(
+                            "Added camera image to conversation jpeg_bytes=%s",
+                            jpeg_bytes,
+                        )
 
             if isinstance(completed_tool.id, str):
                 self._in_flight_tool_calls.discard(completed_tool.id)
@@ -881,6 +913,8 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         connect_kwargs: dict[str, Any] = {}
         if self._realtime_connect_query:
             connect_kwargs["extra_query"] = self._realtime_connect_query
+        elif self._connect_model:
+            connect_kwargs["model"] = self._connect_model
         async with self.client.realtime.connect(**connect_kwargs) as conn:
             try:
                 session_config = self._get_session_config(tool_specs)
@@ -993,6 +1027,24 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                         # Start new debounce timer with the last delta
                         self.partial_transcript_task = asyncio.create_task(
                             self._emit_debounced_partial(current_partial, item_id, sequence_counter)
+                        )
+
+                    # xAI variant: updated snapshots instead of small deltas
+                    if event.type == "conversation.item.input_audio_transcription.updated":
+                        self._mark_activity("user_transcription_delta")
+                        full = (getattr(event, "transcript", None) or "").strip()
+                        item_id = getattr(event, "item_id", None)
+                        if not isinstance(item_id, str) or not item_id:
+                            continue
+                        input_transcript = self.input_transcript_chunks_by_item
+                        current_partial = "".join(input_transcript.deltas) if input_transcript.item_id == item_id else ""
+                        delta = full[len(current_partial) :] if full.startswith(current_partial) else full
+                        self._record_partial_transcript_delta(input_transcript, item_id, delta)
+                        snapshot = "".join(input_transcript.deltas)
+                        sequence_counter = len(input_transcript.deltas) - 1
+                        await self._cancel_partial_transcript_task()
+                        self.partial_transcript_task = asyncio.create_task(
+                            self._emit_debounced_partial(snapshot, item_id, sequence_counter)
                         )
 
                     # Handle completed transcription (user finished speaking)
@@ -1258,6 +1310,17 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         configured_bearer_token = (config.HF_TOKEN or "").strip()
         connection_selection = get_hf_connection_selection()
         direct_realtime_url = get_hf_direct_ws_url()
+        if connection_selection.mode == HF_XAI_CONNECTION_MODE:
+            api_key = (getattr(config, "XAI_API_KEY", None) or "").strip()
+            if not api_key:
+                raise RuntimeError("XAI_API_KEY must be set when HF_REALTIME_CONNECTION_MODE=xai")
+            base_url = (getattr(config, "XAI_BASE_URL", None) or "https://api.x.ai/v1").strip()
+            model = (getattr(config, "XAI_MODEL", None) or "grok-voice-latest").strip()
+            self._realtime_connect_query = {}
+            self._connect_model = model
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            logger.info("Using xAI Grok Voice realtime at %s (model=%s)", base_url, model)
+            return client
         if connection_selection.mode == HF_LOCAL_CONNECTION_MODE:
             if not direct_realtime_url:
                 raise RuntimeError("HF_REALTIME_WS_URL must be set when HF_REALTIME_CONNECTION_MODE=local")
@@ -1266,6 +1329,7 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
                 configured_bearer_token,
             )
             self._realtime_connect_query = connect_query
+            self._connect_model = None
             logger.info("Using direct Hugging Face realtime endpoint %s", direct_realtime_url)
             return client
 
@@ -1307,4 +1371,5 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
             bearer_token,
         )
         self._realtime_connect_query = connect_query
+        self._connect_model = None
         return client

@@ -644,6 +644,9 @@ class LocalStream:
                         "missing Hugging Face session url", reason="missing_hf_session_url", code=-32602
                     )
                 self._persist_hf_allocator_connection()
+            elif hf_mode == "xai":
+                # xAI mode only needs to persist the selected mode. Keys live in the instance .env.
+                self._save_settings(AppSettings(hf_connection_mode="xai"))
             else:
                 raise JsonRpcError("invalid Hugging Face mode", reason="invalid_hf_mode", code=-32602)
 

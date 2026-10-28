@@ -96,7 +96,18 @@ CAMERA_ENABLED_ENV = "REACHY_MINI_CAMERA_ENABLED"
 INSTANCE_PATH_ENV = "REACHY_MINI_INSTANCE_PATH"
 HF_LOCAL_CONNECTION_MODE = "local"
 HF_DEPLOYED_CONNECTION_MODE = "deployed"
+HF_XAI_CONNECTION_MODE = "xai"
 HF_REALTIME_SESSION_PROXY_URL = "https://pollen-robotics-reachy-mini-realtime-url.hf.space/session"
+
+#
+# xAI (Grok Voice) defaults and environment
+#
+XAI_API_KEY_ENV = "XAI_API_KEY"
+XAI_MODEL_ENV = "XAI_MODEL"
+XAI_VOICE_ENV = "XAI_VOICE"
+XAI_REASONING_EFFORT_ENV = "XAI_REASONING_EFFORT"
+XAI_BASE_URL_ENV = "XAI_BASE_URL"
+XAI_VISION_MODEL_ENV = "XAI_VISION_MODEL"
 
 
 @dataclass(frozen=True)
@@ -169,14 +180,20 @@ def resolve_app_timeout_minutes() -> float | None:
 
 
 def normalize_hf_connection_mode(value: str | None) -> str | None:
-    """Normalize the Hugging Face connection mode, if explicitly configured."""
+    """Normalize the realtime connection mode, if explicitly configured.
+
+    Supported values:
+    - deployed: Use the built-in Hugging Face Space allocator
+    - local: Connect directly to a user-provided Hugging Face websocket URL
+    - xai: Use xAI Grok Voice over OpenAI-compatible Realtime
+    """
     candidate = (value or "").strip().lower()
     if not candidate:
         return None
 
-    if candidate not in {HF_LOCAL_CONNECTION_MODE, HF_DEPLOYED_CONNECTION_MODE}:
+    if candidate not in {HF_LOCAL_CONNECTION_MODE, HF_DEPLOYED_CONNECTION_MODE, HF_XAI_CONNECTION_MODE}:
         logger.warning(
-            "Invalid %s=%r. Expected local or deployed.",
+            "Invalid %s=%r. Expected local, deployed, or xai.",
             HF_REALTIME_CONNECTION_MODE_ENV,
             value,
         )
@@ -355,6 +372,15 @@ class Config:
     LOCAL_BARGE_IN_ENABLED = _env_flag("LOCAL_BARGE_IN_ENABLED", default=True)
     HF_TOKEN = os.getenv("HF_TOKEN")  # Optional, falls back to hf auth login if not set
 
+    # xAI (Grok Voice) configuration
+    XAI_API_KEY = os.getenv(XAI_API_KEY_ENV)
+    XAI_MODEL = (os.getenv(XAI_MODEL_ENV) or "grok-voice-latest").strip()
+    XAI_VOICE = (os.getenv(XAI_VOICE_ENV) or "eve").strip()
+    XAI_REASONING_EFFORT = (os.getenv(XAI_REASONING_EFFORT_ENV) or "").strip() or None
+    XAI_BASE_URL = (os.getenv(XAI_BASE_URL_ENV) or "https://api.x.ai/v1").strip()
+    # Vision-capable chat model used by the camera tool in xAI mode. Default is a best-effort guess.
+    XAI_VISION_MODEL = (os.getenv(XAI_VISION_MODEL_ENV) or "grok-2-vision-latest").strip()
+
     logger.debug(
         "HF mode: %s, HF session URL set: %s, HF direct URL set: %s",
         HF_REALTIME_CONNECTION_MODE,
@@ -471,6 +497,13 @@ def refresh_runtime_config_from_env() -> None:
     config.CAMERA_ENABLED = _env_flag(CAMERA_ENABLED_ENV, default=True)
     config.LOCAL_VAD_ENABLED = _env_flag("LOCAL_VAD_ENABLED", default=True)
     config.LOCAL_BARGE_IN_ENABLED = _env_flag("LOCAL_BARGE_IN_ENABLED", default=True)
+    # xAI (Grok Voice)
+    config.XAI_API_KEY = os.getenv(XAI_API_KEY_ENV)
+    config.XAI_MODEL = (os.getenv(XAI_MODEL_ENV) or "grok-voice-latest").strip()
+    config.XAI_VOICE = (os.getenv(XAI_VOICE_ENV) or "eve").strip()
+    config.XAI_REASONING_EFFORT = (os.getenv(XAI_REASONING_EFFORT_ENV) or "").strip() or None
+    config.XAI_BASE_URL = (os.getenv(XAI_BASE_URL_ENV) or "https://api.x.ai/v1").strip()
+    config.XAI_VISION_MODEL = (os.getenv(XAI_VISION_MODEL_ENV) or "grok-2-vision-latest").strip()
 
 
 # Files the app writes into its instance directory, migrated once when the
@@ -532,12 +565,19 @@ def resolve_instance_path(legacy: Path) -> Path:
 
 
 def get_available_voices() -> list[str]:
-    """Return the curated Hugging Face voice list."""
+    """Return the curated voice list for the active backend."""
+    mode = getattr(config, "HF_REALTIME_CONNECTION_MODE", HF_DEPLOYED_CONNECTION_MODE)
+    if mode == HF_XAI_CONNECTION_MODE:
+        # Minimal known xAI voice list; updated via docs when needed.
+        return ["eve", "ara", "rex", "sal", "leo"]
     return list(HF_AVAILABLE_VOICES)
 
 
 def get_default_voice() -> str:
-    """Return the default Hugging Face voice."""
+    """Return the default voice for the active backend."""
+    mode = getattr(config, "HF_REALTIME_CONNECTION_MODE", HF_DEPLOYED_CONNECTION_MODE)
+    if mode == HF_XAI_CONNECTION_MODE:
+        return (config.XAI_VOICE or "eve").strip() or "eve"
     return HF_DEFAULTS.voice
 
 
@@ -559,7 +599,12 @@ def get_hf_connection_selection() -> HFConnectionSelection:
     direct_ws_url = get_hf_direct_ws_url()
     mode = normalize_hf_connection_mode(getattr(config, "HF_REALTIME_CONNECTION_MODE", None))
     if mode is None:
-        raise RuntimeError(f"{HF_REALTIME_CONNECTION_MODE_ENV} must be set to local or deployed.")
+        raise RuntimeError(f"{HF_REALTIME_CONNECTION_MODE_ENV} must be set to local, deployed, or xai.")
+
+    if mode == HF_XAI_CONNECTION_MODE:
+        # xAI requires only an API key; the model/base URL have sensible defaults.
+        has_key = bool((getattr(config, "XAI_API_KEY", None) or "").strip())
+        return HFConnectionSelection(mode=mode, has_target=has_key, session_url=None, direct_ws_url=None)
 
     target = direct_ws_url if mode == HF_LOCAL_CONNECTION_MODE else session_url
 
