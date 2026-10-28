@@ -110,6 +110,56 @@ def main() -> None:
     run(args)
 
 
+def _load_instance_env_and_settings(
+    instance_path: Optional[str],
+    logger: logging.Logger,
+) -> tuple[str, "StartupSettings"]:
+    """Resolve instance directory, load its .env and settings, and return the effective path and startup settings.
+
+    When ``instance_path`` is None (CLI), use the default beside the daemon's own config,
+    migrating legacy data from the installed package directory if needed.
+    """
+    # Local import to avoid import-order issues at module import time
+    from dotenv import load_dotenv  # type: ignore
+    from reachy_mini_conversation_app.config import resolve_instance_path, refresh_runtime_config_from_env, set_instance_path
+    from reachy_mini_conversation_app.startup_settings import StartupSettings, load_startup_settings_into_runtime
+    from reachy_mini_conversation_app.settings_store import load_settings_into_runtime
+
+    # Resolve default path when not provided (CLI)
+    effective_path = instance_path
+    if effective_path is None:
+        legacy = Path(__file__).parent
+        effective_path = str(resolve_instance_path(legacy))
+        logger.info("Resolved default instance path: %s", effective_path)
+
+    # Record globally so other modules (e.g., profiles, tools) use the same root
+    set_instance_path(effective_path)
+
+    startup_settings = StartupSettings()
+    # Load instance-local .env first
+    try:
+        env_path = Path(effective_path) / ".env"
+        if env_path.exists():
+            load_dotenv(dotenv_path=str(env_path), override=True)
+            refresh_runtime_config_from_env()
+            logger.info("Loaded instance configuration from %s", env_path)
+        else:
+            logger.info("No instance .env found at %s", env_path)
+    except Exception as e:
+        logger.warning("Failed to load instance configuration: %s", e)
+
+    # Then startup.json (profile/voice)
+    try:
+        startup_settings = load_startup_settings_into_runtime(effective_path)
+    except Exception as e:
+        logger.warning("Failed to load startup settings: %s", e)
+
+    # Finally, settings.json overrides .env
+    load_settings_into_runtime(effective_path)
+
+    return effective_path, startup_settings
+
+
 def run(
     args: argparse.Namespace,
     robot: ReachyMini = None,
@@ -138,28 +188,8 @@ def run(
 
     logger = setup_logger(args.debug)
     logger.info("Starting Reachy Mini Conversation App")
-    set_instance_path(instance_path)
-    startup_settings = StartupSettings()
-
-    if instance_path is not None:
-        try:
-            from dotenv import load_dotenv
-
-            env_path = Path(instance_path) / ".env"
-            if env_path.exists():
-                load_dotenv(dotenv_path=str(env_path), override=True)
-                refresh_runtime_config_from_env()
-                logger.info("Loaded instance configuration from %s", env_path)
-        except Exception as e:
-            logger.warning("Failed to load instance configuration: %s", e)
-
-        try:
-            startup_settings = load_startup_settings_into_runtime(instance_path)
-        except Exception as e:
-            logger.warning("Failed to load startup settings: %s", e)
-
-    # After the .env: what the user changed through the UI wins over it.
-    load_settings_into_runtime(instance_path)
+    # Resolve and load instance .env + settings (handles CLI and dashboard launches)
+    effective_instance_path, startup_settings = _load_instance_env_and_settings(instance_path, logger)
 
     logger.info(
         "Configured Hugging Face realtime backend, connection mode: %s",
@@ -201,7 +231,7 @@ def run(
     deps = ToolDependencies(
         reachy_mini=robot,
         movement_manager=movement_manager,
-        instance_path=instance_path,
+        instance_path=effective_instance_path,
         # --no-camera is a hard off; otherwise the persisted vision.* switch decides.
         camera_enabled=not args.no_camera and config.CAMERA_ENABLED,
     )
