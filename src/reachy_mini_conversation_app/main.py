@@ -123,6 +123,7 @@ def run(
     from reachy_mini_conversation_app.moves import MovementManager
     from reachy_mini_conversation_app.config import (
         HF_LOCAL_CONNECTION_MODE,
+        HF_XAI_CONNECTION_MODE,
         config,
         set_instance_path,
         get_hf_connection_selection,
@@ -210,12 +211,13 @@ def run(
         from reachy_mini_conversation_app.huggingface_realtime import HuggingFaceRealtimeHandler
 
         hf_connection_selection = get_hf_connection_selection()
-        transport_label = (
-            "Hugging Face direct websocket"
-            if hf_connection_selection.mode == HF_LOCAL_CONNECTION_MODE and hf_connection_selection.has_target
-            else "Hugging Face session proxy"
-        )
-        logger.info("Using Hugging Face realtime handler (%s)", transport_label)
+        if hf_connection_selection.mode == HF_XAI_CONNECTION_MODE:
+            transport_label = "xAI (Grok Voice)"
+        elif hf_connection_selection.mode == HF_LOCAL_CONNECTION_MODE and hf_connection_selection.has_target:
+            transport_label = "Hugging Face direct websocket"
+        else:
+            transport_label = "Hugging Face session proxy"
+        logger.info("Using realtime handler (%s)", transport_label)
         return HuggingFaceRealtimeHandler(
             deps,
             instance_path=instance_path,

@@ -330,6 +330,36 @@ def test_backend_config_switches_to_saved_local_hf_connection_without_payload_ta
     assert "HF_REALTIME_WS_URL=ws://192.168.1.42:8766/v1/realtime" in env_text
 
 
+def test_backend_config_persists_xai_mode_and_marks_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Selecting xAI in the UI should persist mode=xai and trigger a backend restart without wiping keys."""
+    # Start from deployed; provide an env-provided xAI key
+    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", "deployed")
+    monkeypatch.setattr(config, "XAI_API_KEY", "sk-xai")
+    app = FastAPI()
+    handler = MagicMock()
+    handler.shutdown = AsyncMock()
+    robot = SimpleNamespace(media=SimpleNamespace(audio=None, backend=None))
+    stream = LocalStream(
+        handler,
+        robot,
+        settings_app=app,
+        instance_path=str(tmp_path),
+        handler_factory=lambda _voice: handler,
+    )
+    stream._init_settings_ui_if_needed()
+
+    data = _rpc_call(app, "backend.config", {"hf_mode": "xai"})["result"]
+
+    assert data["ok"] is True
+    assert data["hf_connection_mode"] == "xai"
+    assert data["has_hf_connection"] is True  # ready to proceed with xAI (key present)
+    assert stream._restart_requested.is_set()
+    # settings.json persisted the selection
+    assert read_settings(tmp_path).hf_connection_mode == "xai"
+
 def test_backend_config_rejects_invalid_hf_port_zero(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
