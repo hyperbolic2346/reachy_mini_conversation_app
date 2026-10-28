@@ -62,7 +62,7 @@ class Camera(Tool):
                 logger.error("XAI_API_KEY not configured; cannot caption image")
                 return {"error": "xAI API key not configured"}
             base_url = (getattr(config, "XAI_BASE_URL", None) or "https://api.x.ai/v1").strip().rstrip("/")
-            vision_model = (getattr(config, "XAI_VISION_MODEL", None) or "grok-2-vision-latest").strip()
+            vision_model = (getattr(config, "XAI_VISION_MODEL", None) or "grok-4.7").strip()
             b64_im = base64.b64encode(jpeg_bytes).decode("utf-8")
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             payload: Dict[str, Any] = {
@@ -71,20 +71,34 @@ class Camera(Tool):
                     {
                         "role": "user",
                         "content": [
-                            {"type": "input_text", "text": question},
-                            {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64_im}"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{b64_im}", "detail": "high"},
+                            },
+                            {"type": "text", "text": question},
                         ],
                     }
                 ],
             }
             try:
-                async with httpx.AsyncClient(base_url=base_url, timeout=15.0) as client:
+                async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
                     resp = await client.post("/chat/completions", headers=headers, json=payload)
-                    resp.raise_for_status()
+                    if resp.is_error:
+                        body = resp.text
+                        snippet = (body[:500] + "…") if len(body) > 500 else body
+                        logger.warning(
+                            "xAI captioning HTTP %s: %s",
+                            getattr(resp, "status_code", "unknown"),
+                            snippet,
+                        )
+                        return {"error": f"xAI captioning failed: HTTP {resp.status_code}"}
                     data = resp.json()
             except httpx.HTTPError as exc:
-                logger.warning("xAI captioning request failed: %s", exc)
-                return {"error": f"xAI captioning failed: {exc}"}
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                body = getattr(getattr(exc, "response", None), "text", "")
+                snippet = (body[:500] + "…") if isinstance(body, str) and len(body) > 500 else body
+                logger.warning("xAI captioning HTTP error%s: %s", f" {status}" if status else "", snippet or exc)
+                return {"error": f"xAI captioning failed{f' ({status})' if status else ''}"}
             # Extract the best-effort text from OpenAI-compatible response
             try:
                 choice = (data.get("choices") or [{}])[0]

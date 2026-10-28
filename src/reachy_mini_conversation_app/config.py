@@ -379,7 +379,7 @@ class Config:
     XAI_REASONING_EFFORT = (os.getenv(XAI_REASONING_EFFORT_ENV) or "").strip() or None
     XAI_BASE_URL = (os.getenv(XAI_BASE_URL_ENV) or "https://api.x.ai/v1").strip()
     # Vision-capable chat model used by the camera tool in xAI mode. Default is a best-effort guess.
-    XAI_VISION_MODEL = (os.getenv(XAI_VISION_MODEL_ENV) or "grok-2-vision-latest").strip()
+    XAI_VISION_MODEL = (os.getenv(XAI_VISION_MODEL_ENV) or "grok-4.7").strip()
 
     logger.debug(
         "HF mode: %s, HF session URL set: %s, HF direct URL set: %s",
@@ -503,7 +503,7 @@ def refresh_runtime_config_from_env() -> None:
     config.XAI_VOICE = (os.getenv(XAI_VOICE_ENV) or "eve").strip()
     config.XAI_REASONING_EFFORT = (os.getenv(XAI_REASONING_EFFORT_ENV) or "").strip() or None
     config.XAI_BASE_URL = (os.getenv(XAI_BASE_URL_ENV) or "https://api.x.ai/v1").strip()
-    config.XAI_VISION_MODEL = (os.getenv(XAI_VISION_MODEL_ENV) or "grok-2-vision-latest").strip()
+    config.XAI_VISION_MODEL = (os.getenv(XAI_VISION_MODEL_ENV) or "grok-4.7").strip()
 
 
 # Files the app writes into its instance directory, migrated once when the
