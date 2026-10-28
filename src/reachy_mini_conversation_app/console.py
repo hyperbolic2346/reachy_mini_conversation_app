@@ -26,6 +26,8 @@ from reachy_mini_conversation_app.config import (
     HF_REALTIME_WS_URL_ENV,
     HF_LOCAL_CONNECTION_MODE,
     HF_DEPLOYED_CONNECTION_MODE,
+    HF_XAI_CONNECTION_MODE,
+    XAI_API_KEY_ENV,
     config,
     get_default_voice,
     get_hf_session_url,
@@ -644,6 +646,9 @@ class LocalStream:
                         "missing Hugging Face session url", reason="missing_hf_session_url", code=-32602
                     )
                 self._persist_hf_allocator_connection()
+            elif hf_mode == "xai":
+                # xAI mode only needs to persist the selected mode. Keys live in the instance .env.
+                self._save_settings(AppSettings(hf_connection_mode="xai"))
             else:
                 raise JsonRpcError("invalid Hugging Face mode", reason="invalid_hf_mode", code=-32602)
 
@@ -775,9 +780,13 @@ class LocalStream:
                     continue
 
             if not has_hf_realtime_target():
-                self._set_backend_connection_state(
-                    "waiting_for_config", f"{HF_REALTIME_WS_URL_ENV} is not configured."
+                sel = get_hf_connection_selection()
+                reason = (
+                    f"{XAI_API_KEY_ENV} is not configured."
+                    if sel.mode == HF_XAI_CONNECTION_MODE
+                    else f"{HF_REALTIME_WS_URL_ENV} is not configured."
                 )
+                self._set_backend_connection_state("waiting_for_config", reason)
                 await self._sleep_or_restart_requested(0.5)
                 continue
 
@@ -836,14 +845,23 @@ class LocalStream:
 
         # If the Hugging Face target is still missing -> wait until provided via the settings UI
         if not has_hf_realtime_target():
-            self._set_backend_connection_state("waiting_for_config", f"{HF_REALTIME_WS_URL_ENV} is not configured.")
+            sel = get_hf_connection_selection()
+            reason = (
+                f"{XAI_API_KEY_ENV} is not configured."
+                if sel.mode == HF_XAI_CONNECTION_MODE
+                else f"{HF_REALTIME_WS_URL_ENV} is not configured."
+            )
+            self._set_backend_connection_state("waiting_for_config", reason)
             if self._settings_app is None:
                 logger.error(
-                    "%s not found. Set it in the app .env before starting the Hugging Face backend.",
-                    HF_REALTIME_WS_URL_ENV,
+                    "%s not found. Set it in the app .env before starting the backend.",
+                    XAI_API_KEY_ENV if sel.mode == HF_XAI_CONNECTION_MODE else HF_REALTIME_WS_URL_ENV,
                 )
                 return
-            logger.warning("%s not found. Open the app settings page to configure it.", HF_REALTIME_WS_URL_ENV)
+            logger.warning(
+                "%s not found. Open the app settings page to configure it.",
+                XAI_API_KEY_ENV if sel.mode == HF_XAI_CONNECTION_MODE else HF_REALTIME_WS_URL_ENV,
+            )
             # Poll until a target becomes available (set via the settings UI)
             try:
                 while not self._stop_event.is_set() and not has_hf_realtime_target():

@@ -12,6 +12,7 @@ from reachy_mini_conversation_app.settings_store import (
     update_settings,
     load_settings_into_runtime,
 )
+from reachy_mini_conversation_app.config import get_hf_connection_selection
 
 
 def test_absent_file_reads_as_unset(tmp_path: Path) -> None:
@@ -106,3 +107,18 @@ def test_load_leaves_unset_fields_to_the_environment(
     load_settings_into_runtime(tmp_path)
 
     assert config.REALTIME_TRANSCRIPTION_LANGUAGE == expected_language
+
+
+def test_xai_mode_applies_and_keeps_env_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Selecting xAI via settings keeps the env-provided API key and reports a ready target."""
+    # Start from a different mode and with an env-provided key
+    monkeypatch.setattr(config, "HF_REALTIME_CONNECTION_MODE", "deployed")
+    monkeypatch.setattr(config, "XAI_API_KEY", "sk-xai")
+    update_settings(tmp_path, AppSettings(hf_connection_mode="xai"))
+
+    load_settings_into_runtime(tmp_path)
+
+    assert config.HF_REALTIME_CONNECTION_MODE == "xai"
+    assert config.XAI_API_KEY == "sk-xai"  # unchanged by settings
+    selection = get_hf_connection_selection()
+    assert selection.mode == "xai" and selection.has_target is True

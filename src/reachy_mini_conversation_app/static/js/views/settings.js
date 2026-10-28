@@ -16,6 +16,7 @@ import { h } from "../ui.js";
 const HF_CONNECTION_MODES = Object.freeze({
   DEPLOYED: "deployed",
   LOCAL: "local",
+  XAI: "xai",
 });
 
 const DEFAULT_HF_HOST = "localhost";
@@ -24,6 +25,7 @@ const DEFAULT_HF_PORT = 8765;
 const HF_MODE_HINTS = Object.freeze({
   [HF_CONNECTION_MODES.DEPLOYED]: "Uses the hosted Hugging Face backend. No API key required.",
   [HF_CONNECTION_MODES.LOCAL]: "Connects directly to the host and port below.",
+  [HF_CONNECTION_MODES.XAI]: "Uses xAI Grok Voice. Set XAI_API_KEY in the app .env.",
 });
 
 export async function mountSettingsView({ outlet, signal }) {
@@ -67,7 +69,8 @@ function buildConnectionSection({ onSaved } = {}) {
     "select",
     { class: "settings-select", name: "hf_mode" },
     h("option", { value: HF_CONNECTION_MODES.DEPLOYED }, "Hosted"),
-    h("option", { value: HF_CONNECTION_MODES.LOCAL }, "Local")
+    h("option", { value: HF_CONNECTION_MODES.LOCAL }, "Local"),
+    h("option", { value: HF_CONNECTION_MODES.XAI }, "xAI (Grok Voice)")
   );
   const hfHostInput = h("input", {
     type: "text",
@@ -131,6 +134,7 @@ function buildConnectionSection({ onSaved } = {}) {
 
   function syncLocalFields() {
     const isLocal = hfModeSelect.value === HF_CONNECTION_MODES.LOCAL;
+    const isXai = hfModeSelect.value === HF_CONNECTION_MODES.XAI;
     hfLocalFields.style.display = isLocal ? "" : "none";
     hfHostInput.disabled = !isLocal;
     hfPortInput.disabled = !isLocal;
@@ -419,6 +423,7 @@ function statusRow(label, value, tone) {
 function formatHfMode(mode) {
   if (mode === HF_CONNECTION_MODES.LOCAL) return "Local";
   if (mode === HF_CONNECTION_MODES.DEPLOYED) return "Hosted";
+  if (mode === HF_CONNECTION_MODES.XAI) return "xAI (Grok Voice)";
   return "-";
 }
 
